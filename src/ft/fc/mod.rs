@@ -1,19 +1,14 @@
 use std::fmt;
 use std::ptr;
 
-use foreign_types::{ForeignType, ForeignTypeRef};
-
-use fontconfig_sys as ffi;
-
-use ffi::constants::{FC_SLANT_ITALIC, FC_SLANT_OBLIQUE, FC_SLANT_ROMAN};
-use ffi::constants::{FC_WEIGHT_BLACK, FC_WEIGHT_BOLD, FC_WEIGHT_EXTRABLACK, FC_WEIGHT_EXTRABOLD};
-use ffi::constants::{FC_WEIGHT_BOOK, FC_WEIGHT_MEDIUM, FC_WEIGHT_REGULAR, FC_WEIGHT_SEMIBOLD};
-use ffi::constants::{FC_WEIGHT_EXTRALIGHT, FC_WEIGHT_LIGHT, FC_WEIGHT_THIN};
 use ffi::FcInitBringUptoDate;
 use ffi::FcResultNoMatch;
+use ffi::*;
 use ffi::{FcFontList, FcFontMatch, FcFontSort};
 use ffi::{FcMatchFont, FcMatchPattern, FcMatchScan};
 use ffi::{FcSetApplication, FcSetSystem};
+use fontconfig::fontconfig as ffi;
+use foreign_types::{ForeignType, ForeignTypeRef};
 
 pub mod config;
 pub use config::{Config, ConfigRef};

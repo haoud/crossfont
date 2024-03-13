@@ -7,6 +7,7 @@
 #![deny(clippy::all, clippy::if_not_else, clippy::enum_glob_use)]
 
 use std::fmt::{self, Display, Formatter};
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(not(any(target_os = "macos", windows)))]
@@ -98,9 +99,67 @@ impl FontKey {
     }
 }
 
+/// An identifier of a glyph.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GlyphId(u32);
+
+impl GlyphId {
+    const C_BIT: u32 = 0b1000_0000_0000_0000_0000_0000_0000_0000;
+    const C_MASK: u32 = !Self::C_BIT;
+
+    /// Creates a `GlyphId` representing a unicode scalar value.
+    pub fn char(c: char) -> Self {
+        Self(c as u32 | Self::C_BIT)
+    }
+
+    /// Creates a `GlyphId` representing a glyph index.
+    ///
+    /// The index must not have the most significant bit set.
+    pub fn with_glyph_index(n: u32) -> Self {
+        assert!(n < Self::C_BIT);
+        Self(n)
+    }
+
+    /// Creates a `GlyphId` representing a placeholder value.
+    pub fn placeholder() -> Self {
+        Self(0)
+    }
+
+    pub fn value(self) -> u32 {
+        self.0
+    }
+
+    pub fn as_char(self) -> Option<char> {
+        let value = self.value();
+
+        if value & Self::C_BIT == 0 {
+            None
+        } else {
+            match char::try_from(value & Self::C_MASK) {
+                Ok(c) => Some(c),
+                Err(_) => unreachable!(),
+            }
+        }
+    }
+}
+
+impl fmt::Debug for GlyphId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_tuple("GlyphId");
+
+        if let Some(c) = self.as_char() {
+            f.field(&c);
+        } else {
+            f.field(&self.value());
+        }
+
+        f.finish()
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct GlyphKey {
-    pub character: char,
+    pub id: GlyphId,
     pub font_key: FontKey,
     pub size: Size,
 }
@@ -150,7 +209,7 @@ impl Size {
 
 #[derive(Debug, Clone)]
 pub struct RasterizedGlyph {
-    pub character: char,
+    pub id: GlyphId,
     pub width: i32,
     pub height: i32,
     pub top: i32,
@@ -171,7 +230,7 @@ pub enum BitmapBuffer {
 impl Default for RasterizedGlyph {
     fn default() -> RasterizedGlyph {
         RasterizedGlyph {
-            character: ' ',
+            id: GlyphId::placeholder(),
             width: 0,
             height: 0,
             top: 0,
@@ -223,7 +282,7 @@ impl Display for Error {
         match self {
             Error::FontNotFound(font) => write!(f, "font {:?} not found", font),
             Error::MissingGlyph(glyph) => {
-                write!(f, "glyph for character {:?} not found", glyph.character)
+                write!(f, "glyph for id {:?} not found", glyph.id)
             },
             Error::UnknownFontKey => f.write_str("invalid font key"),
             Error::MetricsNotFound => f.write_str("metrics not found"),
@@ -249,4 +308,7 @@ pub trait Rasterize {
 
     /// Kerning between two characters.
     fn kerning(&mut self, left: GlyphKey, right: GlyphKey) -> (f32, f32);
+
+    /// Get the path of a font by its key.
+    fn font_path(&self, _: FontKey) -> Result<&Path, Error>;
 }

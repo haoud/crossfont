@@ -1,22 +1,22 @@
 //! Rasterization powered by DirectWrite.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
-
 use dwrote::{
     FontCollection, FontFace, FontFallback, FontStretch, FontStyle, FontWeight, GlyphOffset,
     GlyphRunAnalysis, TextAnalysisSource, TextAnalysisSourceMethods, DWRITE_GLYPH_RUN,
 };
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::path::{Path, PathBuf};
 
 use winapi::shared::ntdef::{HRESULT, LOCALE_NAME_MAX_LENGTH};
 use winapi::um::dwrite;
 use winapi::um::winnls::GetUserDefaultLocaleName;
 
 use super::{
-    BitmapBuffer, Error, FontDesc, FontKey, GlyphKey, Metrics, RasterizedGlyph, Size, Slant, Style,
-    Weight,
+    BitmapBuffer, Error, FontDesc, FontKey, GlyphId, GlyphKey, Metrics, RasterizedGlyph, Size,
+    Slant, Style, Weight,
 };
 
 /// DirectWrite uses 0 for missing glyph symbols.
@@ -30,6 +30,8 @@ struct Font {
     weight: FontWeight,
     style: FontStyle,
     stretch: FontStretch,
+    placeholder_glyph_index: u16,
+    path: PathBuf,
 }
 
 pub struct DirectWriteRasterizer {
@@ -44,7 +46,7 @@ impl DirectWriteRasterizer {
         &self,
         face: &FontFace,
         size: Size,
-        character: char,
+        id: GlyphId,
         glyph_index: u16,
     ) -> Result<RasterizedGlyph, Error> {
         let em_size = size.as_px();
@@ -84,7 +86,7 @@ impl DirectWriteRasterizer {
         );
 
         Ok(RasterizedGlyph {
-            character,
+            id,
             width: (bounds.right - bounds.left) as i32,
             height: (bounds.bottom - bounds.top) as i32,
             top: -bounds.top,
@@ -146,7 +148,7 @@ impl crate::Rasterize for DirectWriteRasterizer {
 
     fn metrics(&self, key: FontKey, size: Size) -> Result<Metrics, Error> {
         let face = &self.get_loaded_font(key)?.face;
-        let vmetrics = face.metrics().metrics0();
+        let vmetrics = face.metrics(key, size).metrics0();
 
         let scale = size.as_px() / f32::from(vmetrics.designUnitsPerEm);
 
@@ -232,16 +234,33 @@ impl crate::Rasterize for DirectWriteRasterizer {
         let loaded_fallback_font;
         let mut font = loaded_font;
         let mut glyph_index = self.get_glyph_index(&loaded_font.face, glyph.character);
-        if glyph_index == MISSING_GLYPH_INDEX {
-            if let Some(fallback_font) = self.get_fallback_font(loaded_font, glyph.character) {
+
+        let glyph_index = if let Some(character) = glyph.id.as_char() {
+            if let Some(fallback_font) = self.get_fallback_font(&loaded_font, glyph.character) {
+                let mut glyph_index = self.get_glyph_index(&loaded_font.face, character);
                 loaded_fallback_font = Font::from(fallback_font);
-                glyph_index = self.get_glyph_index(&loaded_fallback_font.face, glyph.character);
-                font = &loaded_fallback_font;
+                if glyph_index == MISSING_GLYPH_INDEX {
+                    glyph_index = self.get_glyph_index(&loaded_fallback_font.face, glyph.character);
+                    if let Some(fallback_font) = self.get_fallback_font(&loaded_font, character) {
+                        font = &loaded_fallback_font;
+                        loaded_fallback_font = Font::from(fallback_font);
+                        glyph_index = self.get_glyph_index(&loaded_fallback_font.face, character);
+                        font = &loaded_fallback_font;
+                    }
+                }
+            };
+            glyph_index
+        } else {
+            let index = glyph.id.value();
+            if index == 0 {
+                loaded_font.placeholder_glyph_index
+            } else {
+                index as u16
             }
-        }
+        };
 
         let rasterized_glyph =
-            self.rasterize_glyph(&font.face, glyph.size, glyph.character, glyph_index)?;
+            self.rasterize_glyph(&font.face, glyph.size, glyph.id, glyph_index)?;
 
         if glyph_index == MISSING_GLYPH_INDEX {
             Err(Error::MissingGlyph(rasterized_glyph))
@@ -253,16 +272,28 @@ impl crate::Rasterize for DirectWriteRasterizer {
     fn kerning(&mut self, _left: GlyphKey, _right: GlyphKey) -> (f32, f32) {
         (0., 0.)
     }
+
+    fn font_path(&self, key: FontKey) -> Result<&Path, Error> {
+        Ok(&self.get_loaded_font(key)?.path)
+    }
 }
 
 impl From<dwrote::Font> for Font {
     fn from(font: dwrote::Font) -> Font {
+        let face = font.create_font_face();
+        let placeholder_glyph_index =
+            face.get_glyph_indices(&[' ' as u32]).first().copied().unwrap_or(MISSING_GLYPH_INDEX);
+        let files = face.get_files();
+        let path = files.first().unwrap().get_font_file_path().unwrap();
+
         Font {
-            face: font.create_font_face(),
+            face,
             family_name: font.family_name(),
             weight: font.weight(),
             style: font.style(),
             stretch: font.stretch(),
+            placeholder_glyph_index,
+            path,
         }
     }
 }

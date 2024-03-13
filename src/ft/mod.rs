@@ -3,6 +3,7 @@
 use std::cmp::{min, Ordering};
 use std::collections::HashMap;
 use std::fmt::{self, Formatter};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -53,7 +54,7 @@ struct FallbackList {
     coverage: CharSet,
 }
 
-struct FaceLoadingProperties {
+pub struct FaceLoadingProperties {
     load_flags: LoadFlag,
     render_mode: freetype::RenderMode,
     lcd_filter: c_uint,
@@ -63,6 +64,7 @@ struct FaceLoadingProperties {
     matrix: Option<Matrix>,
     pixelsize_fixup_factor: Option<f64>,
     ft_face: Rc<FtFace>,
+    placeholder_glyph_index: u32,
     rgba: Rgba,
 }
 
@@ -71,15 +73,18 @@ impl fmt::Debug for FaceLoadingProperties {
         f.debug_struct("Face")
             .field("ft_face", &self.ft_face)
             .field("load_flags", &self.load_flags)
-            .field("render_mode", &match self.render_mode {
-                freetype::RenderMode::Normal => "Normal",
-                freetype::RenderMode::Light => "Light",
-                freetype::RenderMode::Mono => "Mono",
-                freetype::RenderMode::Lcd => "Lcd",
-                freetype::RenderMode::LcdV => "LcdV",
-                freetype::RenderMode::Max => "Max",
-                freetype::RenderMode::Sdf => "Sdf",
-            })
+            .field(
+                "render_mode",
+                &match self.render_mode {
+                    freetype::RenderMode::Normal => "Normal",
+                    freetype::RenderMode::Light => "Light",
+                    freetype::RenderMode::Mono => "Mono",
+                    freetype::RenderMode::Lcd => "Lcd",
+                    freetype::RenderMode::LcdV => "LcdV",
+                    freetype::RenderMode::Max => "Max",
+                    freetype::RenderMode::Sdf => "Sdf",
+                },
+            )
             .field("lcd_filter", &self.lcd_filter)
             .finish()
     }
@@ -142,7 +147,7 @@ impl Rasterize for FreeTypeRasterizer {
     }
 
     fn metrics(&self, key: FontKey, _size: Size) -> Result<Metrics, Error> {
-        let face = &mut self.loader.faces.get(&key).ok_or(Error::UnknownFontKey)?;
+        let face = &self.loader.faces.get(&key).ok_or(Error::UnknownFontKey)?.0;
         let full = self.full_metrics(face)?;
 
         let ascent = from_freetype_26_6(full.size_metrics.ascender);
@@ -202,24 +207,34 @@ impl Rasterize for FreeTypeRasterizer {
     fn get_glyph(&mut self, glyph_key: GlyphKey) -> Result<RasterizedGlyph, Error> {
         let font_key = self.face_for_glyph(glyph_key);
         let face = &self.loader.faces[&font_key];
-        let index = face.ft_face.get_char_index(glyph_key.character as usize).unwrap_or_default();
-        let pixelsize = face.non_scalable.unwrap_or_else(|| glyph_key.size.as_px());
+        let pixelsize = face.0.non_scalable.unwrap_or_else(|| glyph_key.size.as_px());
 
-        if !face.colored_bitmap {
-            face.ft_face.set_char_size(to_freetype_26_6(pixelsize), 0, 0, 0)?;
+        let index = if let Some(c) = glyph_key.id.as_char() {
+            face.0.ft_face.get_char_index(c as usize).unwrap()
+        } else {
+            let val = glyph_key.id.value();
+            if val == 0 {
+                face.0.placeholder_glyph_index
+            } else {
+                val
+            }
+        };
+
+        if !face.0.colored_bitmap {
+            face.0.ft_face.set_char_size(to_freetype_26_6(pixelsize), 0, 0, 0)?;
         }
 
         unsafe {
             let ft_lib = self.loader.library.raw();
-            freetype::ffi::FT_Library_SetLcdFilter(ft_lib, face.lcd_filter);
+            freetype::ffi::FT_Library_SetLcdFilter(ft_lib, face.0.lcd_filter);
         }
 
-        face.ft_face.load_glyph(index, face.load_flags)?;
+        face.0.ft_face.load_glyph(index, face.0.load_flags)?;
 
-        let glyph = face.ft_face.glyph();
+        let glyph = face.0.ft_face.glyph();
 
         // Generate synthetic bold.
-        if face.embolden {
+        if face.0.embolden {
             unsafe {
                 freetype_sys::FT_GlyphSlot_Embolden(glyph.raw()
                     as *const freetype_sys::FT_GlyphSlotRec
@@ -229,8 +244,8 @@ impl Rasterize for FreeTypeRasterizer {
 
         let advance = unsafe {
             // Transform glyphs with the matrix from Fontconfig. Primarily used to generate italics.
-            let raw_glyph = face.ft_face.raw().glyph;
-            if let Some(matrix) = face.matrix.as_ref() {
+            let raw_glyph = face.0.ft_face.raw().glyph;
+            if let Some(matrix) = face.0.matrix.as_ref() {
                 // Check that the glyph is a vectorial outline, not a bitmap.
                 if (*raw_glyph).format == freetype_sys::FT_GLYPH_FORMAT_OUTLINE {
                     let outline = &(*raw_glyph).outline;
@@ -241,7 +256,7 @@ impl Rasterize for FreeTypeRasterizer {
 
             // Don't render bitmap glyphs, it results in error with freestype 2.11.0.
             if (*raw_glyph).format != freetype_sys::FT_GLYPH_FORMAT_BITMAP {
-                glyph.render_glyph(face.render_mode)?;
+                glyph.render_glyph(face.0.render_mode)?;
             }
 
             let advance = (*raw_glyph).advance;
@@ -249,10 +264,10 @@ impl Rasterize for FreeTypeRasterizer {
         };
 
         let (pixel_height, pixel_width, buffer) =
-            Self::normalize_buffer(&glyph.bitmap(), &face.rgba)?;
+            Self::normalize_buffer(&glyph.bitmap(), &face.0.rgba)?;
 
         let mut rasterized_glyph = RasterizedGlyph {
-            character: glyph_key.character,
+            id: glyph_key.id,
             top: glyph.bitmap_top(),
             left: glyph.bitmap_left(),
             width: pixel_width,
@@ -265,12 +280,12 @@ impl Rasterize for FreeTypeRasterizer {
             return Err(Error::MissingGlyph(rasterized_glyph));
         }
 
-        if face.colored_bitmap {
-            let fixup_factor = match face.pixelsize_fixup_factor {
+        if face.0.colored_bitmap {
+            let fixup_factor = match face.0.pixelsize_fixup_factor {
                 Some(fixup_factor) => fixup_factor,
                 None => {
                     // Fallback if the user has bitmap scaling disabled.
-                    let metrics = face.ft_face.size_metrics().ok_or(Error::MetricsNotFound)?;
+                    let metrics = face.0.ft_face.size_metrics().ok_or(Error::MetricsNotFound)?;
                     f64::from(pixelsize) / f64::from(metrics.y_ppem)
                 },
             };
@@ -287,14 +302,33 @@ impl Rasterize for FreeTypeRasterizer {
 
     fn kerning(&mut self, left: GlyphKey, right: GlyphKey) -> (f32, f32) {
         let font_key = self.face_for_glyph(left);
-        let mut ft_face = (*self.loader.faces[&font_key].ft_face).clone();
+        let mut ft_face = (*self.loader.faces[&font_key].0.ft_face).clone();
 
         if !freetype_sys::FT_HAS_KERNING(ft_face.raw_mut()) {
             return (0., 0.);
         }
 
-        let left = ft_face.get_char_index(left.character as usize).unwrap_or_default();
-        let right = ft_face.get_char_index(right.character as usize).unwrap_or_default();
+        let left = if let Some(c) = left.id.as_char() {
+            ft_face.get_char_index(c as usize).unwrap()
+        } else {
+            let val = left.id.value();
+            if val == 0 {
+                self.loader.faces[&font_key].0.placeholder_glyph_index
+            } else {
+                val
+            }
+        };
+
+        let right = if let Some(c) = right.id.as_char() {
+            ft_face.get_char_index(c as usize).unwrap()
+        } else {
+            let val = right.id.value();
+            if val == 0 {
+                self.loader.faces[&font_key].0.placeholder_glyph_index
+            } else {
+                val
+            }
+        };
 
         let mut kerning = freetype_sys::FT_Vector::default();
         let mode = freetype_sys::FT_KERNING_DEFAULT;
@@ -304,6 +338,10 @@ impl Rasterize for FreeTypeRasterizer {
         }
 
         (from_freetype_26_6(kerning.x), from_freetype_26_6(kerning.y))
+    }
+
+    fn font_path(&self, key: FontKey) -> Result<&std::path::Path, Error> {
+        self.loader.faces.get(&key).ok_or(Error::UnknownFontKey).map(|(_, path)| path.as_path())
     }
 }
 
@@ -423,9 +461,13 @@ impl FreeTypeRasterizer {
     }
 
     fn face_for_glyph(&mut self, glyph_key: GlyphKey) -> FontKey {
-        if let Some(face) = self.loader.faces.get(&glyph_key.font_key) {
-            if face.ft_face.get_char_index(glyph_key.character as usize).is_some() {
-                return glyph_key.font_key;
+        if let Some(c) = glyph_key.id.as_char() {
+            if let Some(face) = self.loader.faces.get(&glyph_key.font_key) {
+                let index = face.0.ft_face.get_char_index(c as usize);
+
+                if index.is_some() {
+                    return glyph_key.font_key;
+                }
             }
         }
 
@@ -435,8 +477,14 @@ impl FreeTypeRasterizer {
     fn load_face_with_glyph(&mut self, glyph: GlyphKey) -> Result<FontKey, Error> {
         let fallback_list = self.fallback_lists.get(&glyph.font_key).unwrap();
 
+        let c = if let Some(c) = glyph.id.as_char() {
+            c
+        } else {
+            return Ok(glyph.font_key);
+        };
+
         // Check whether glyph is presented in any fallback font.
-        if !fallback_list.coverage.has_char(glyph.character) {
+        if !fallback_list.coverage.has_char(c) {
             return Ok(glyph.font_key);
         }
 
@@ -446,13 +494,12 @@ impl FreeTypeRasterizer {
             match self.loader.faces.get(&font_key) {
                 Some(face) => {
                     // We found something in a current face, so let's use it.
-                    if face.ft_face.get_char_index(glyph.character as usize).is_some() {
+                    if face.0.ft_face.get_char_index(c as usize).is_some() {
                         return Ok(font_key);
                     }
                 },
                 None => {
-                    if !font_pattern.get_charset().map_or(false, |cs| cs.has_char(glyph.character))
-                    {
+                    if !font_pattern.get_charset().map_or(false, |cs| cs.has_char(c)) {
                         continue;
                     }
 
@@ -655,7 +702,7 @@ unsafe impl Send for FreeTypeRasterizer {}
 
 struct FreeTypeLoader {
     library: Library,
-    faces: HashMap<FontKey, FaceLoadingProperties>,
+    faces: HashMap<FontKey, (FaceLoadingProperties, PathBuf)>,
     ft_faces: HashMap<FtFaceLocation, Rc<FtFace>>,
 }
 
@@ -701,8 +748,12 @@ impl FreeTypeLoader {
 
             let ft_face = match self.ft_faces.get(&ft_face_location) {
                 Some(ft_face) => Rc::clone(ft_face),
-                None => self.load_ft_face(ft_face_location)?,
+                None => self.load_ft_face(ft_face_location.clone())?,
             };
+
+            // This will be different for each font so we can't use a constant but we don't want to
+            // look it up every time so we cache it on font load.
+            let placeholder_glyph_index = ft_face.get_char_index(' ' as usize).unwrap();
 
             let non_scalable = if pattern.scalable().next().unwrap_or(true) {
                 None
@@ -735,13 +786,14 @@ impl FreeTypeLoader {
                 embolden,
                 matrix,
                 pixelsize_fixup_factor,
+                placeholder_glyph_index,
                 ft_face,
                 rgba,
             };
 
             debug!("Loaded Face {:?}", face);
 
-            self.faces.insert(font_key, face);
+            self.faces.insert(font_key, (face, ft_face_location.path));
 
             Ok(Some(font_key))
         } else {

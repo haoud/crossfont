@@ -82,7 +82,6 @@ impl fmt::Debug for FaceLoadingProperties {
                     freetype::RenderMode::Lcd => "Lcd",
                     freetype::RenderMode::LcdV => "LcdV",
                     freetype::RenderMode::Max => "Max",
-                    freetype::RenderMode::Sdf => "Sdf",
                 },
             )
             .field("lcd_filter", &self.lcd_filter)
@@ -210,7 +209,7 @@ impl Rasterize for FreeTypeRasterizer {
         let pixelsize = face.0.non_scalable.unwrap_or_else(|| glyph_key.size.as_px());
 
         let index = if let Some(c) = glyph_key.id.as_char() {
-            face.0.ft_face.get_char_index(c as usize).unwrap()
+            face.0.ft_face.get_char_index(c as usize)
         } else {
             let val = glyph_key.id.value();
             if val == 0 {
@@ -309,7 +308,7 @@ impl Rasterize for FreeTypeRasterizer {
         }
 
         let left = if let Some(c) = left.id.as_char() {
-            ft_face.get_char_index(c as usize).unwrap()
+            ft_face.get_char_index(c as usize)
         } else {
             let val = left.id.value();
             if val == 0 {
@@ -320,7 +319,7 @@ impl Rasterize for FreeTypeRasterizer {
         };
 
         let right = if let Some(c) = right.id.as_char() {
-            ft_face.get_char_index(c as usize).unwrap()
+            ft_face.get_char_index(c as usize)
         } else {
             let val = right.id.value();
             if val == 0 {
@@ -465,7 +464,7 @@ impl FreeTypeRasterizer {
             if let Some(face) = self.loader.faces.get(&glyph_key.font_key) {
                 let index = face.0.ft_face.get_char_index(c as usize);
 
-                if index.is_some() {
+                if index != 0 {
                     return glyph_key.font_key;
                 }
             }
@@ -494,7 +493,7 @@ impl FreeTypeRasterizer {
             match self.loader.faces.get(&font_key) {
                 Some(face) => {
                     // We found something in a current face, so let's use it.
-                    if face.0.ft_face.get_char_index(c as usize).is_some() {
+                    if face.0.ft_face.get_char_index(c as usize) != 0 {
                         return Ok(font_key);
                     }
                 },
@@ -753,7 +752,7 @@ impl FreeTypeLoader {
 
             // This will be different for each font so we can't use a constant but we don't want to
             // look it up every time so we cache it on font load.
-            let placeholder_glyph_index = ft_face.get_char_index(' ' as usize).unwrap();
+            let placeholder_glyph_index = ft_face.get_char_index(' ' as usize);
 
             let non_scalable = if pattern.scalable().next().unwrap_or(true) {
                 None

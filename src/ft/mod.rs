@@ -752,7 +752,7 @@ impl FreeTypeLoader {
 
             // This will be different for each font so we can't use a constant but we don't want to
             // look it up every time so we cache it on font load.
-            let placeholder_glyph_index = ft_face.get_char_index(' ' as usize);
+            let placeholder_glyph_index = ft_face.get_char_index('\0' as usize);
 
             let non_scalable = if pattern.scalable().next().unwrap_or(true) {
                 None
